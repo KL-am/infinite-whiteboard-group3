@@ -333,6 +333,7 @@
 
       <div class="tool-group" aria-label="白板操作">
         <button id="addStickyBtn" type="button" title="加入便條" aria-label="加入便條">＋便條</button>
+        <button id="addImageBtn" type="button" title="加入圖片" aria-label="加入圖片">＋圖片</button>
         <div class="swatch-row" aria-label="便條顏色">
           <button class="color-swatch active" type="button" data-sticky-color="#fef08a" style="--swatch-color: #fef08a" title="淡黃色便條" aria-label="淡黃色便條"></button>
           <button class="color-swatch" type="button" data-sticky-color="#bbf7d0" style="--swatch-color: #bbf7d0" title="淡綠色便條" aria-label="淡綠色便條"></button>
@@ -356,6 +357,7 @@
     <div id="status" role="status" aria-live="polite"></div>
     <textarea id="stickyEditor" aria-label="便條內容"></textarea>
     <input type="file" id="importJsonInput" accept="application/json" hidden>
+    <input type="file" id="imageInput" accept="image/jpeg,image/png" hidden>
   </main>
 
   <script>
@@ -368,6 +370,7 @@
     const smoothToggleBtn = document.getElementById("smoothToggleBtn");
     const zoomLabel = document.getElementById("zoomLabel");
     const addStickyBtn = document.getElementById("addStickyBtn");
+    const addImageBtn = document.getElementById("addImageBtn");
     const undoBtn = document.getElementById("undoBtn");
     const deleteSelectedBtn = document.getElementById("deleteSelectedBtn");
     const clearBtn = document.getElementById("clearBtn");
@@ -376,8 +379,10 @@
     const exportJsonBtn = document.getElementById("exportJsonBtn");
     const importJsonBtn = document.getElementById("importJsonBtn");
     const importJsonInput = document.getElementById("importJsonInput");
+    const imageInput = document.getElementById("imageInput");
     const statusBox = document.getElementById("status");
     const stickyEditor = document.getElementById("stickyEditor");
+    const imageCache = new Map();
 
     const MIN_ZOOM = 0.1;
     const MAX_ZOOM = 5;
@@ -603,6 +608,11 @@
         return;
       }
 
+      if (stroke.type === "image") {
+        drawImageStroke(targetCtx, stroke);
+        return;
+      }
+
       if (stroke.start && stroke.end) {
         drawShape(targetCtx, stroke);
       }
@@ -678,6 +688,26 @@
 
       targetCtx.stroke();
       targetCtx.restore();
+    }
+
+    function drawImageStroke(targetCtx, imageStroke) {
+      if (!isValidImageStroke(imageStroke)) return;
+
+      let image = imageCache.get(imageStroke.src);
+      if (!image) {
+        image = new Image();
+        image.onload = () => {
+          markLayerDirty();
+          requestRedraw();
+        };
+        image.src = imageStroke.src;
+        imageCache.set(imageStroke.src, image);
+      }
+
+      if (!image.complete || !image.naturalWidth) return;
+
+      const topLeft = worldToScreen(imageStroke.x, imageStroke.y);
+      targetCtx.drawImage(image, topLeft.x, topLeft.y, imageStroke.width * viewport.zoom, imageStroke.height * viewport.zoom);
     }
 
     function drawStickyNote(targetCtx, note) {
@@ -1087,6 +1117,35 @@
       previewShape = null;
     }
 
+    function addImage(file) {
+      if (!file) return;
+
+      const reader = new FileReader();
+      reader.onload = () => {
+        const image = new Image();
+        image.onload = () => {
+          const maxSize = 400;
+          const scale = Math.min(1, maxSize / image.width, maxSize / image.height);
+          const width = image.width * scale;
+          const height = image.height * scale;
+          const center = screenToWorld(cssWidth() / 2, cssHeight() / 2);
+          const imageStroke = { id: newId("image"), type: "image", src: reader.result, x: center.x - width / 2, y: center.y - height / 2, width, height };
+
+          imageCache.set(imageStroke.src, image);
+          strokes.push(imageStroke);
+          selectedStrokeId = imageStroke.id;
+          setTool("select");
+          markLayerDirty();
+          pushUndoAction({ type: "add", stroke: cloneStroke(imageStroke) });
+          requestRedraw();
+          scheduleAutosave();
+          showStatus("圖片已加入白板。");
+        };
+        image.src = reader.result;
+      };
+      reader.readAsDataURL(file);
+    }
+
     function addStickyNote() {
       confirmStickyEdit();
       const center = screenToWorld(cssWidth() / 2, cssHeight() / 2);
@@ -1371,7 +1430,7 @@
         stroke.end.y += deltaY;
       }
 
-      if (stroke.type === "sticky") {
+      if (stroke.type === "sticky" || stroke.type === "image") {
         stroke.x += deltaX;
         stroke.y += deltaY;
       }
@@ -1387,6 +1446,10 @@
           maxX: stroke.x + stroke.noteWidth,
           maxY: stroke.y + stroke.noteHeight
         };
+      }
+
+      if (stroke.type === "image" && isValidImageStroke(stroke)) {
+        return { minX: stroke.x, minY: stroke.y, maxX: stroke.x + stroke.width, maxY: stroke.y + stroke.height };
       }
 
       const points = [];
@@ -1615,7 +1678,15 @@
         return isPointInStickyNote(world, stroke);
       }
 
+      if (stroke.type === "image") {
+        return isPointInImage(world, stroke);
+      }
+
       return false;
+    }
+
+    function isPointInImage(point, image) {
+      return isValidImageStroke(image) && point.x >= image.x && point.x <= image.x + image.width && point.y >= image.y && point.y <= image.y + image.height;
     }
 
     function isPointInStickyNote(point, note) {
@@ -2039,6 +2110,15 @@
     });
 
     addStickyBtn.addEventListener("click", addStickyNote);
+    addImageBtn.addEventListener("click", () => {
+      imageInput.value = "";
+      imageInput.click();
+    });
+
+    imageInput.addEventListener("change", () => {
+      const file = imageInput.files && imageInput.files[0];
+      if (file) addImage(file);
+    });
     undoBtn.addEventListener("click", undoLastAction);
     deleteSelectedBtn.addEventListener("click", deleteSelectedStroke);
 
@@ -2230,7 +2310,15 @@
         return isValidStickyNote(stroke);
       }
 
+      if (stroke.type === "image") {
+        return isValidImageStroke(stroke);
+      }
+
       return false;
+    }
+
+    function isValidImageStroke(image) {
+      return image && typeof image.src === "string" && image.src.startsWith("data:image/") && Number.isFinite(image.x) && Number.isFinite(image.y) && Number.isFinite(image.width) && Number.isFinite(image.height) && image.width > 0 && image.height > 0;
     }
 
     function isValidStickyNote(note) {

@@ -261,7 +261,8 @@
       transform: translate(-50%, 0);
     }
 
-    #stickyEditor {
+    #stickyEditor,
+    #textEditor {
       position: fixed;
       z-index: 9;
       display: none;
@@ -312,6 +313,7 @@
         <button class="icon-button" type="button" data-tool="rect" title="長方形" aria-label="長方形">□</button>
         <button class="icon-button" type="button" data-tool="circle" title="圓形" aria-label="圓形">○</button>
         <button class="icon-button" type="button" data-tool="ellipse" title="橢圓形" aria-label="橢圓形">◯</button>
+        <button class="icon-button" type="button" data-tool="text" title="文字框" aria-label="文字框">T</button>
       </div>
 
       <div class="tool-group" aria-label="筆觸設定">
@@ -356,6 +358,7 @@
 
     <div id="status" role="status" aria-live="polite"></div>
     <textarea id="stickyEditor" aria-label="便條內容"></textarea>
+    <textarea id="textEditor" aria-label="文字框內容"></textarea>
     <input type="file" id="importJsonInput" accept="application/json" hidden>
     <input type="file" id="imageInput" accept="image/jpeg,image/png" hidden>
   </main>
@@ -382,6 +385,7 @@
     const imageInput = document.getElementById("imageInput");
     const statusBox = document.getElementById("status");
     const stickyEditor = document.getElementById("stickyEditor");
+    const textEditor = document.getElementById("textEditor");
     const imageCache = new Map();
 
     const MIN_ZOOM = 0.1;
@@ -397,6 +401,9 @@
     const STICKY_CONTROL_GAP = 4;
     const STICKY_RESIZE_HANDLE_SIZE = 16;
     const IMAGE_RESIZE_HANDLE_SIZE = 18;
+    const TEXT_DEFAULT_WIDTH = 320;
+    const TEXT_DEFAULT_HEIGHT = 100;
+    const TEXT_FONT_SIZE = 24;
     const MIN_IMAGE_SIZE = 40;
     const MAX_IMAGE_SIZE = 2000;
     const AUTOSAVE_KEY = "infinite-whiteboard.autosave.v1";
@@ -435,6 +442,8 @@
     let imageResizeChanged = false;
     let editingStickyId = null;
     let editingStickyOriginal = null;
+    let editingTextId = null;
+    let editingTextOriginal = null;
     let erasedStrokeIds = new Set();
     let currentStroke = null;
     let previewShape = null;
@@ -620,6 +629,11 @@
         return;
       }
 
+      if (stroke.type === "text") {
+        drawTextStroke(targetCtx, stroke);
+        return;
+      }
+
       if (stroke.start && stroke.end) {
         drawShape(targetCtx, stroke);
       }
@@ -783,6 +797,31 @@
       targetCtx.restore();
     }
 
+    function drawTextStroke(targetCtx, textStroke) {
+      if (!isValidTextStroke(textStroke)) return;
+
+      const topLeft = worldToScreen(textStroke.x, textStroke.y);
+      const width = textStroke.width * viewport.zoom;
+      const fontSize = Math.max(10, textStroke.fontSize * viewport.zoom);
+      const lineHeight = fontSize * 1.3;
+      const text = textStroke.text || (textStroke.id === editingTextId ? "點此輸入文字" : "");
+
+      targetCtx.save();
+      targetCtx.fillStyle = textStroke.text ? (textStroke.color || colorPicker.value) : "rgba(23, 32, 51, 0.34)";
+      targetCtx.font = fontSize + "px ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif";
+      targetCtx.textBaseline = "top";
+
+      if (text) {
+        const lines = wrapText(targetCtx, text, width);
+        for (let i = 0; i < lines.length; i += 1) {
+          const y = topLeft.y + i * lineHeight;
+          if (y > topLeft.y + textStroke.height * viewport.zoom) break;
+          targetCtx.fillText(lines[i], topLeft.x, y);
+        }
+      }
+      targetCtx.restore();
+    }
+
     function wrapText(targetCtx, text, maxWidth) {
       const result = [];
       const paragraphs = text.split(/\n/);
@@ -920,6 +959,7 @@
 
     function beginImageResize(event, image) {
       confirmStickyEdit();
+      confirmTextEdit();
       imageResizePointerId = event.pointerId;
       imageResizeId = image.id;
       imageResizeOriginal = cloneStroke(image);
@@ -1040,6 +1080,7 @@
       drawSelectionBox();
       updateZoomLabel();
       updateStickyEditorPosition();
+      updateTextEditorPosition();
     }
 
     function updateZoomLabel() {
@@ -1228,6 +1269,7 @@
 
     function addStickyNote() {
       confirmStickyEdit();
+      confirmTextEdit();
       const center = screenToWorld(cssWidth() / 2, cssHeight() / 2);
       const note = {
         id: newId("sticky"),
@@ -1253,6 +1295,31 @@
       showStatus("已加入 200×200 便條。");
     }
 
+    function addTextAt(world) {
+      confirmStickyEdit();
+      confirmTextEdit();
+      const textStroke = {
+        id: newId("text"),
+        type: "text",
+        x: world.x,
+        y: world.y,
+        width: TEXT_DEFAULT_WIDTH,
+        height: TEXT_DEFAULT_HEIGHT,
+        fontSize: TEXT_FONT_SIZE,
+        color: colorPicker.value,
+        text: ""
+      };
+
+      strokes.push(textStroke);
+      selectedStrokeId = textStroke.id;
+      pushUndoAction({ type: "add", stroke: cloneStroke(textStroke) });
+      setTool("select");
+      markLayerDirty();
+      requestRedraw();
+      startTextEdit(textStroke);
+      showStatus("請輸入文字，按 Ctrl+Enter 完成。");
+    }
+
     function handleStickyControl(event, control) {
       selectedStrokeId = control.note.id;
       updateUndoButton();
@@ -1270,6 +1337,7 @@
       if (control.action === "confirm") {
         if (editingStickyId === control.note.id) {
           confirmStickyEdit();
+      confirmTextEdit();
         } else {
           showStatus("這張便條尚未進入編輯。");
         }
@@ -1284,9 +1352,74 @@
       return false;
     }
 
+    function startTextEdit(textStroke) {
+      if (!isValidTextStroke(textStroke)) return;
+      confirmTextEdit();
+      editingTextId = textStroke.id;
+      editingTextOriginal = cloneStroke(textStroke);
+      textEditor.value = textStroke.text || "";
+      textEditor.style.display = "block";
+      updateTextEditorPosition();
+      textEditor.focus();
+      textEditor.select();
+      markLayerDirty();
+      requestRedraw();
+    }
+
+    function confirmTextEdit() {
+      if (!editingTextId) return;
+
+      const textStroke = findStrokeById(editingTextId);
+      if (textStroke && textStroke.type === "text") {
+        const before = editingTextOriginal ? cloneStroke(editingTextOriginal) : cloneStroke(textStroke);
+        const value = textEditor.value;
+
+        if (!value.trim()) {
+          removeStrokeById(textStroke.id);
+          const lastAction = undoStack[undoStack.length - 1];
+          if (lastAction && lastAction.type === "add" && lastAction.stroke.id === textStroke.id) undoStack.pop();
+          selectedStrokeId = null;
+        } else {
+          textStroke.text = value;
+          const after = cloneStroke(textStroke);
+          if (JSON.stringify(before) !== JSON.stringify(after)) {
+            pushUndoAction({ type: "update", strokeId: textStroke.id, before, after });
+          }
+        }
+        updateUndoButton();
+        scheduleAutosave();
+      }
+
+      editingTextId = null;
+      editingTextOriginal = null;
+      textEditor.value = "";
+      textEditor.style.display = "none";
+      markLayerDirty();
+      requestRedraw();
+    }
+
+    function updateTextEditorPosition() {
+      if (!editingTextId) return;
+      const textStroke = findStrokeById(editingTextId);
+      if (!textStroke || textStroke.type !== "text") {
+        textEditor.style.display = "none";
+        editingTextId = null;
+        editingTextOriginal = null;
+        return;
+      }
+      const topLeft = worldToScreen(textStroke.x, textStroke.y);
+      textEditor.style.left = topLeft.x + "px";
+      textEditor.style.top = topLeft.y + "px";
+      textEditor.style.width = Math.max(80, textStroke.width * viewport.zoom) + "px";
+      textEditor.style.height = Math.max(40, textStroke.height * viewport.zoom) + "px";
+      textEditor.style.fontSize = Math.max(10, textStroke.fontSize * viewport.zoom) + "px";
+      textEditor.style.color = textStroke.color || colorPicker.value;
+    }
+
     function startStickyEdit(note) {
       if (!isValidStickyNote(note)) return;
       confirmStickyEdit();
+      confirmTextEdit();
       editingStickyId = note.id;
       editingStickyOriginal = cloneStroke(note);
       stickyEditor.value = note.text || "";
@@ -1353,6 +1486,7 @@
     function beginStickyResize(event, note) {
       if (!isValidStickyNote(note)) return;
       confirmStickyEdit();
+      confirmTextEdit();
       stickyResizePointerId = event.pointerId;
       stickyResizeNoteId = note.id;
       stickyResizeStartWorld = screenToWorld(getCanvasPoint(event).x, getCanvasPoint(event).y);
@@ -1403,6 +1537,7 @@
 
     function beginSelection(event, world) {
       confirmStickyEdit();
+      confirmTextEdit();
       selectionPointerId = event.pointerId;
       selectionStartWorld = world;
       selectionMoved = false;
@@ -1510,7 +1645,7 @@
         stroke.end.y += deltaY;
       }
 
-      if (stroke.type === "sticky" || stroke.type === "image") {
+      if (stroke.type === "sticky" || stroke.type === "image" || stroke.type === "text") {
         stroke.x += deltaX;
         stroke.y += deltaY;
       }
@@ -1529,6 +1664,10 @@
       }
 
       if (stroke.type === "image" && isValidImageStroke(stroke)) {
+        return { minX: stroke.x, minY: stroke.y, maxX: stroke.x + stroke.width, maxY: stroke.y + stroke.height };
+      }
+
+      if (stroke.type === "text" && isValidTextStroke(stroke)) {
         return { minX: stroke.x, minY: stroke.y, maxX: stroke.x + stroke.width, maxY: stroke.y + stroke.height };
       }
 
@@ -1762,11 +1901,23 @@
         return isPointInImage(world, stroke);
       }
 
+      if (stroke.type === "text") {
+        return isPointInText(world, stroke);
+      }
+
       return false;
     }
 
     function isPointInImage(point, image) {
       return isValidImageStroke(image) && point.x >= image.x && point.x <= image.x + image.width && point.y >= image.y && point.y <= image.y + image.height;
+    }
+
+    function isPointInText(point, textStroke) {
+      return isValidTextStroke(textStroke)
+        && point.x >= textStroke.x
+        && point.x <= textStroke.x + textStroke.width
+        && point.y >= textStroke.y
+        && point.y <= textStroke.y + textStroke.height;
     }
 
     function isPointInStickyNote(point, note) {
@@ -1862,6 +2013,7 @@
 
     function beginDrawing(event) {
       confirmStickyEdit();
+      confirmTextEdit();
       const point = getCanvasPoint(event);
       const world = screenToWorld(point.x, point.y);
       drawingPointerId = event.pointerId;
@@ -1875,6 +2027,12 @@
 
       if (activeTool === "select") {
         beginSelection(event, world);
+        return;
+      }
+
+      if (activeTool === "text") {
+        drawingPointerId = null;
+        addTextAt(world);
         return;
       }
 
@@ -1973,6 +2131,7 @@
 
     function beginPan(event) {
       confirmStickyEdit();
+      confirmTextEdit();
       isPanning = true;
       panPointerId = event.pointerId;
       lastPanPoint = getCanvasPoint(event);
@@ -2212,10 +2371,20 @@
     undoBtn.addEventListener("click", undoLastAction);
     deleteSelectedBtn.addEventListener("click", deleteSelectedStroke);
 
+    textEditor.addEventListener("keydown", (event) => {
+      if ((event.metaKey || event.ctrlKey) && event.code === "Enter") {
+        event.preventDefault();
+        confirmTextEdit();
+      }
+    });
+
+    textEditor.addEventListener("blur", confirmTextEdit);
+
     stickyEditor.addEventListener("keydown", (event) => {
       if ((event.metaKey || event.ctrlKey) && event.code === "Enter") {
         event.preventDefault();
         confirmStickyEdit();
+      confirmTextEdit();
       }
     });
 
@@ -2314,12 +2483,14 @@
     window.addEventListener("resize", resizeCanvas);
     window.addEventListener("pagehide", () => {
       confirmStickyEdit();
+      confirmTextEdit();
       saveBoardToLocalStorage();
     });
 
     document.addEventListener("visibilitychange", () => {
       if (document.visibilityState === "hidden") {
         confirmStickyEdit();
+      confirmTextEdit();
         saveBoardToLocalStorage();
       }
     });
@@ -2404,11 +2575,28 @@
         return isValidImageStroke(stroke);
       }
 
+      if (stroke.type === "text") {
+        return isValidTextStroke(stroke);
+      }
+
       return false;
     }
 
     function isValidImageStroke(image) {
       return image && typeof image.src === "string" && image.src.startsWith("data:image/") && Number.isFinite(image.x) && Number.isFinite(image.y) && Number.isFinite(image.width) && Number.isFinite(image.height) && image.width > 0 && image.height > 0;
+    }
+
+    function isValidTextStroke(textStroke) {
+      return textStroke
+        && typeof textStroke.text === "string"
+        && Number.isFinite(textStroke.x)
+        && Number.isFinite(textStroke.y)
+        && Number.isFinite(textStroke.width)
+        && Number.isFinite(textStroke.height)
+        && Number.isFinite(textStroke.fontSize)
+        && textStroke.width > 0
+        && textStroke.height > 0
+        && textStroke.fontSize > 0;
     }
 
     function isValidStickyNote(note) {

@@ -396,6 +396,9 @@
     const STICKY_CONTROL_SIZE = 22;
     const STICKY_CONTROL_GAP = 4;
     const STICKY_RESIZE_HANDLE_SIZE = 16;
+    const IMAGE_RESIZE_HANDLE_SIZE = 18;
+    const MIN_IMAGE_SIZE = 40;
+    const MAX_IMAGE_SIZE = 2000;
     const AUTOSAVE_KEY = "infinite-whiteboard.autosave.v1";
     const AUTOSAVE_DELAY = 250;
     const PINCH_ZOOM_DEADZONE = 0.015;
@@ -426,6 +429,10 @@
     let stickyResizeStartWorld = null;
     let stickyResizeOriginalNote = null;
     let stickyResizeChanged = false;
+    let imageResizePointerId = null;
+    let imageResizeId = null;
+    let imageResizeOriginal = null;
+    let imageResizeChanged = false;
     let editingStickyId = null;
     let editingStickyOriginal = null;
     let erasedStrokeIds = new Set();
@@ -895,6 +902,64 @@
       return null;
     }
 
+    function getImageResizeRect(image) {
+      const topLeft = worldToScreen(image.x, image.y);
+      return {
+        x: topLeft.x + image.width * viewport.zoom - IMAGE_RESIZE_HANDLE_SIZE,
+        y: topLeft.y + image.height * viewport.zoom - IMAGE_RESIZE_HANDLE_SIZE,
+        size: IMAGE_RESIZE_HANDLE_SIZE
+      };
+    }
+
+    function findImageResizeAt(screenPoint) {
+      if (activeTool !== "select" || !selectedStrokeId) return null;
+      const image = findStrokeById(selectedStrokeId);
+      if (!image || image.type !== "image" || !isValidImageStroke(image)) return null;
+      return isScreenPointInRect(screenPoint, getImageResizeRect(image)) ? image : null;
+    }
+
+    function beginImageResize(event, image) {
+      confirmStickyEdit();
+      imageResizePointerId = event.pointerId;
+      imageResizeId = image.id;
+      imageResizeOriginal = cloneStroke(image);
+      imageResizeChanged = false;
+      cancelDrawing();
+      selectedStrokeId = image.id;
+      requestRedraw();
+    }
+
+    function continueImageResize(event) {
+      if (imageResizePointerId !== event.pointerId || !imageResizeId || !imageResizeOriginal) return;
+      const point = getCanvasPoint(event);
+      const world = screenToWorld(point.x, point.y);
+      const image = findStrokeById(imageResizeId);
+      if (!image || image.type !== "image") return;
+
+      const aspectRatio = imageResizeOriginal.height / imageResizeOriginal.width;
+      const width = clamp(world.x - image.x, MIN_IMAGE_SIZE, MAX_IMAGE_SIZE);
+      image.width = width;
+      image.height = clamp(width * aspectRatio, MIN_IMAGE_SIZE, MAX_IMAGE_SIZE);
+      imageResizeChanged = true;
+      markLayerDirty();
+      requestRedraw();
+    }
+
+    function endImageResize(event) {
+      if (imageResizePointerId !== event.pointerId) return;
+      const image = imageResizeId ? findStrokeById(imageResizeId) : null;
+      if (imageResizeChanged && image && imageResizeOriginal) {
+        pushUndoAction({ type: "update", strokeId: image.id, before: imageResizeOriginal, after: cloneStroke(image) });
+        scheduleAutosave();
+      }
+      imageResizePointerId = null;
+      imageResizeId = null;
+      imageResizeOriginal = null;
+      imageResizeChanged = false;
+      markLayerDirty();
+      requestRedraw();
+    }
+
     function isScreenPointInRect(point, rect) {
       return point.x >= rect.x
         && point.x <= rect.x + rect.size
@@ -946,6 +1011,21 @@
         ctx.beginPath();
         ctx.rect(x - 3, y - 3, 6, 6);
         ctx.fill();
+        ctx.stroke();
+      }
+      if (stroke.type === "image") {
+        const imageTopLeft = worldToScreen(stroke.x, stroke.y);
+        const imageWidth = stroke.width * viewport.zoom;
+        const imageHeight = stroke.height * viewport.zoom;
+        const handleSize = IMAGE_RESIZE_HANDLE_SIZE;
+        ctx.fillStyle = "#ffffff";
+        ctx.strokeStyle = "#0f8b8d";
+        ctx.lineWidth = 1.5;
+        ctx.fillRect(imageTopLeft.x + imageWidth - handleSize, imageTopLeft.y + imageHeight - handleSize, handleSize, handleSize);
+        ctx.strokeRect(imageTopLeft.x + imageWidth - handleSize, imageTopLeft.y + imageHeight - handleSize, handleSize, handleSize);
+        ctx.beginPath();
+        ctx.moveTo(imageTopLeft.x + imageWidth - handleSize + 4, imageTopLeft.y + imageHeight - 5);
+        ctx.lineTo(imageTopLeft.x + imageWidth - 5, imageTopLeft.y + imageHeight - handleSize + 4);
         ctx.stroke();
       }
       ctx.restore();
@@ -2003,6 +2083,12 @@
         return;
       }
 
+      const imageResize = findImageResizeAt(getCanvasPoint(event));
+      if (imageResize) {
+        beginImageResize(event, imageResize);
+        return;
+      }
+
       if (event.button === 1 || event.button === 2 || isSpacePressed || activeTool === "pan") {
         beginPan(event);
       } else {
@@ -2017,6 +2103,8 @@
 
       if (activePointers.size >= 2) {
         continuePinch();
+      } else if (imageResizePointerId === event.pointerId) {
+        continueImageResize(event);
       } else if (stickyResizePointerId === event.pointerId) {
         continueStickyResize(event);
       } else if (isPanning) {
@@ -2034,6 +2122,8 @@
       if (pinchState) {
         cancelDrawing();
         pinchState = null;
+      } else if (imageResizePointerId === event.pointerId) {
+        endImageResize(event);
       } else if (stickyResizePointerId === event.pointerId) {
         endStickyResize(event);
       } else if (isPanning) {
